@@ -1,39 +1,33 @@
-"""Pengambilan jadwal sholat dan timezone lokal dari Aladhan API."""
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+"""Pengambilan dan pengolahan jadwal sholat dari Aladhan API."""
+from datetime import date, datetime
 import requests
 
 BASE_URL = "https://api.aladhan.com/v1"
-DEFAULT_COUNTRY = "Indonesia"
 
-def pecah_lokasi(lokasi):
-    """Menerima 'Yogyakarta' atau 'Cairo, Egypt'."""
-    bagian = [x.strip() for x in str(lokasi).split(",", 1)]
-    if len(bagian) == 1:
-        return bagian[0], DEFAULT_COUNTRY
-    if not all(bagian):
-        return None, None
-    return bagian[0], bagian[1]
 
-def _ambil_data(city, country, tanggal=None):
+def _ambil_timings(city, tanggal=None):
     try:
-        endpoint = f"{BASE_URL}/timingsByCity"
         if tanggal:
-            endpoint += f"/{tanggal.strftime('%d-%m-%Y')}"
+            tanggal_api = tanggal.strftime("%d-%m-%Y")
+            url = f"{BASE_URL}/timingsByCity/{tanggal_api}"
+        else:
+            url = f"{BASE_URL}/timingsByCity"
         response = requests.get(
-            endpoint,
-            params={"city": city, "country": country, "method": 11},
-            timeout=15,
+            url,
+            params={"city": city, "country": "Indonesia", "method": 11},
+            timeout=10,
         )
         response.raise_for_status()
         payload = response.json()
         if payload.get("code") != 200:
             return None
-        return payload["data"]
+        return payload["data"]["timings"]
     except (requests.RequestException, ValueError, KeyError, TypeError):
         return None
 
+
 def _jam(value):
+    """Ambil HH:MM dari nilai API, termasuk jika ada keterangan zona."""
     if not value:
         return None
     try:
@@ -41,29 +35,12 @@ def _jam(value):
     except ValueError:
         return None
 
-def get_timezone(lokasi="Yogyakarta"):
-    city, country = pecah_lokasi(lokasi)
-    if not city:
-        return None
-    data = _ambil_data(city, country)
-    if not data:
-        return None
-    nama_tz = data.get("meta", {}).get("timezone")
-    if not nama_tz:
-        return None
-    try:
-        return ZoneInfo(nama_tz)
-    except ZoneInfoNotFoundError:
-        return None
 
-def get_jadwal_sholat(lokasi="Yogyakarta", tanggal=None):
-    city, country = pecah_lokasi(lokasi)
-    if not city:
+def get_jadwal_sholat(city="Yogyakarta", tanggal=None):
+    """Mengambil lima waktu sholat dan Sunrise untuk tanggal tertentu."""
+    raw = _ambil_timings(city, tanggal)
+    if not raw:
         return None
-    data = _ambil_data(city, country, tanggal)
-    if not data:
-        return None
-    raw = data.get("timings", {})
     return {
         "Subuh": _jam(raw.get("Fajr")),
         "Dzuhur": _jam(raw.get("Dhuhr")),
@@ -73,13 +50,23 @@ def get_jadwal_sholat(lokasi="Yogyakarta", tanggal=None):
         "Terbit": _jam(raw.get("Sunrise")),
     }
 
-def get_batas_sholat(lokasi, tanggal, timings=None):
-    timings = timings or get_jadwal_sholat(lokasi, tanggal)
+
+def get_batas_sholat(city, tanggal, timings=None):
+    """Mengembalikan batas akhir tiap sholat sebagai HH:MM.
+
+    Subuh berakhir saat matahari terbit; sholat lainnya berakhir saat
+    waktu sholat berikutnya masuk. Isya berakhir saat Subuh hari berikutnya.
+    """
+    from datetime import timedelta
+
+    timings = timings or get_jadwal_sholat(city, tanggal)
     if not timings:
         return None
-    besok = get_jadwal_sholat(lokasi, tanggal + timedelta(days=1))
+
+    besok = get_jadwal_sholat(city, tanggal + timedelta(days=1))
     if not besok:
         return None
+
     return {
         "Subuh": timings.get("Terbit"),
         "Dzuhur": timings.get("Ashar"),
@@ -88,11 +75,14 @@ def get_batas_sholat(lokasi, tanggal, timings=None):
         "Isya": besok.get("Subuh"),
     }
 
-def format_jadwal(lokasi, timings):
+
+def format_jadwal(city, timings):
     if not timings:
-        return f"Gagal mengambil jadwal sholat untuk {lokasi}. Periksa penulisan kota dan negara."
-    teks = f"📅 Jadwal Sholat {lokasi}\\n\\n"
-    for nama in ("Subuh", "Dzuhur", "Ashar", "Maghrib", "Isya"):
-        if timings.get(nama):
-            teks += f"• **{nama}**: {timings[nama]}\\n"
+        return f"Gagal mengambil jadwal sholat untuk kota {city}. Coba lagi nanti atau periksa nama kota."
+    nama_sholat = ["Subuh", "Dzuhur", "Ashar", "Maghrib", "Isya"]
+    teks = f"📅 Jadwal Sholat Kota {city}\n\n"
+    for sholat in nama_sholat:
+        waktu = timings.get(sholat)
+        if waktu:
+            teks += f"• **{sholat}**: {waktu}\n"
     return teks

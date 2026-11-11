@@ -1,8 +1,7 @@
 """SholatBot: pengingat waktu sholat dan pencatat konfirmasi sholat."""
 import logging
 import os
-from datetime import date, datetime, time, timedelta
-from zoneinfo import ZoneInfo
+from datetime import date, datetime, time, timedelta, timezone
 
 from dotenv import load_dotenv
 from telegram import (
@@ -22,7 +21,7 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("sholatbot")
 
-DEFAULT_TIMEZONE = ZoneInfo('Asia/Jakarta')
+WIB = timezone(timedelta(hours=7))
 NAMA_SHOLAT = ["Subuh", "Dzuhur", "Ashar", "Maghrib", "Isya"]
 SLUG = {
     "Subuh": "subuh", "Dzuhur": "dzuhur", "Ashar": "ashar",
@@ -34,7 +33,7 @@ BANTUAN = (
     "🤖 PANDUAN SHOLATBOT\n\n"
     "/start - Memulai atau mengaktifkan pengingat\n"
     "/jadwal - Melihat jadwal sholat hari ini\n"
-    "/setkota kota, negara - Mengubah lokasi (contoh: Cairo, Egypt)\n"
+    "/setkota nama_kota - Mengubah kota lokasi\n"
     "/riwayat - Melihat riwayat sholat harian, mingguan, dan bulanan\n"
     "/help - Menampilkan panduan ini\n\n"
     "Saat notifikasi muncul, tekan Sudah Sholat setelah selesai, "
@@ -46,14 +45,9 @@ def _db_path(context):
     return context.bot_data["db"]
 
 
-def _timezone_user(context, user_id):
-    kota = db.get_user_city(user_id, path=_db_path(context))
-    return logika.get_timezone(kota) or DEFAULT_TIMEZONE
-
-
-def _datetime_sholat(tanggal, jam, tz):
+def _datetime_sholat(tanggal, jam):
     jam_obj = datetime.strptime(jam, "%H:%M").time()
-    return datetime.combine(tanggal, jam_obj, tzinfo=tz)
+    return datetime.combine(tanggal, jam_obj, tzinfo=WIB)
 
 
 def _hapus_job_user(context, user_id):
@@ -64,9 +58,7 @@ def _hapus_job_user(context, user_id):
 
 
 def _jadwalkan(context, callback, when, data, name):
-    user_id = data.get("user_id") if isinstance(data, dict) else None
-    tz = _timezone_user(context, user_id) if user_id else DEFAULT_TIMEZONE
-    sekarang = datetime.now(tz)
+    sekarang = datetime.now(WIB)
     if when <= sekarang:
         return
     context.job_queue.run_once(
@@ -102,14 +94,13 @@ async def set_kota(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "Cara penggunaan: /setkota Yogyakarta\n"
-            "Untuk luar negeri: /setkota Cairo, Egypt"
+            "Contoh lain: /setkota Jakarta"
         )
         return
 
     kota_baru = " ".join(context.args).strip()
     timings = logika.get_jadwal_sholat(kota_baru)
-    zona = logika.get_timezone(kota_baru)
-    if not timings or not zona:
+    if not timings:
         await update.message.reply_text(
             f"Maaf, jadwal untuk kota '{kota_baru}' tidak ditemukan. "
             "Periksa ejaan nama kota, lalu coba lagi."
@@ -122,8 +113,7 @@ async def set_kota(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.set_user_city(user_id, kota_baru, path=_db_path(context))
     await atur_penjadwalan_user(context, user_id, chat_id)
     await update.message.reply_text(
-        f"✅ Lokasi berhasil diubah menjadi {kota_baru}.\n"
-        f"Zona waktu: {zona.key}\n"
+        f"✅ Kota berhasil diubah menjadi {kota_baru}.\n"
         "Jadwal pengingat sudah diperbarui."
     )
 
@@ -132,11 +122,7 @@ async def cek_jadwal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     kota = db.get_user_city(user_id, path=_db_path(context))
     timings = logika.get_jadwal_sholat(kota)
-    zona = logika.get_timezone(kota)
-    teks = logika.format_jadwal(kota, timings)
-    if zona:
-        teks += f"\\nZona waktu: {zona.key}"
-    await update.message.reply_text(teks, parse_mode="Markdown")
+    await update.message.reply_text(logika.format_jadwal(kota, timings), parse_mode="Markdown")
 
 
 async def atur_penjadwalan_user(
@@ -147,8 +133,7 @@ async def atur_penjadwalan_user(
     kota = db.get_user_city(user_id, path=db_path)
     _hapus_job_user(context, user_id)
 
-    tz = _timezone_user(context, user_id)
-    tanggal = datetime.now(tz).date()
+    tanggal = datetime.now(WIB).date()
     timings = logika.get_jadwal_sholat(kota, tanggal)
     if not timings:
         log.error("Gagal mengambil jadwal untuk user %s (%s)", user_id, kota)
@@ -159,15 +144,15 @@ async def atur_penjadwalan_user(
         log.error("Gagal mengambil batas waktu sholat untuk %s", kota)
         return
 
-    sekarang = datetime.now(tz)
+    sekarang = datetime.now(WIB)
     for nama in NAMA_SHOLAT:
         jam_mulai = timings.get(nama)
         jam_akhir = batas.get(nama)
         if not jam_mulai or not jam_akhir:
             continue
 
-        mulai_dt = _datetime_sholat(tanggal, jam_mulai, tz)
-        akhir_dt = _datetime_sholat(tanggal, jam_akhir, tz)
+        mulai_dt = _datetime_sholat(tanggal, jam_mulai)
+        akhir_dt = _datetime_sholat(tanggal, jam_akhir)
         if nama == "Isya" and akhir_dt <= mulai_dt:
             akhir_dt += timedelta(days=1)
 
@@ -198,7 +183,7 @@ async def atur_penjadwalan_user(
         )
 
     besok_pukul = datetime.combine(
-        tanggal + timedelta(days=1), time(0, 5), tzinfo=tz
+        tanggal + timedelta(days=1), time(0, 5), tzinfo=WIB
     )
     _jadwalkan(
         context, perbarui_semua_jadwal_user, besok_pukul,
@@ -230,7 +215,7 @@ def _keyboard(prayer, prayer_date):
 
 async def kirim_notifikasi_sholat(context: ContextTypes.DEFAULT_TYPE):
     data = context.job.data
-    now = datetime.now(_timezone_user(context, data['user_id']))
+    now = datetime.now(WIB)
     end_at = datetime.fromisoformat(data["end_at"])
     if now >= end_at:
         return
@@ -257,7 +242,7 @@ async def kirim_pengingat_susulan(context: ContextTypes.DEFAULT_TYPE):
     )
     if not sesi:
         return
-    if datetime.now(_timezone_user(context, data["user_id"])) >= datetime.fromisoformat(sesi["end_at"]):
+    if datetime.now(WIB) >= datetime.fromisoformat(sesi["end_at"]):
         db.hapus_sesi(
             data["user_id"], data["prayer_date"], data["prayer"],
             path=_db_path(context)
@@ -322,7 +307,7 @@ async def tombol_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    now = datetime.now(_timezone_user(context, user_id))
+    now = datetime.now(WIB)
     batas = datetime.fromisoformat(sesi["end_at"])
     if now >= batas:
         db.hapus_sesi(user_id, prayer_date, prayer, path=db_path)
@@ -374,8 +359,8 @@ async def tombol_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Aksi tidak dikenali.")
 
 
-def _rentang_riwayat(periode, context, user_id):
-    hari_ini = datetime.now(_timezone_user(context, user_id)).date()
+def _rentang_riwayat(periode):
+    hari_ini = datetime.now(WIB).date()
     if periode == "hari":
         awal = akhir = hari_ini
         judul = "Hari Ini"
@@ -392,7 +377,7 @@ def _rentang_riwayat(periode, context, user_id):
 
 async def kirim_riwayat(update, context, periode):
     user_id = update.effective_user.id
-    awal, akhir, judul = _rentang_riwayat(periode, context, user_id)
+    awal, akhir, judul = _rentang_riwayat(periode)
     rows = db.get_riwayat(
         user_id, awal.isoformat(), akhir.isoformat(), path=_db_path(context)
     )
